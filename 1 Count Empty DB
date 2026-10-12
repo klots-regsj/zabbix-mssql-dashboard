@@ -1,0 +1,131 @@
+SET NOCOUNT ON;
+
+DECLARE @EmptyDatabases int = 0;
+DECLARE @Database sysname;
+DECLARE @SQL nvarchar(max);
+
+------------------------------------------------------------
+-- Find databaser
+--
+-- Medtager:
+--   * Standalone databaser
+--   * AG databaser hvor denne server er PRIMARY
+--   * Databaser der er mindst 180 dage gamle
+--
+-- Ignorerer:
+--   * AG SECONDARY databaser
+--   * Databaser yngre end 180 dage
+--   * Snapshots
+--   * Offline databaser
+--   * DBA databaser
+------------------------------------------------------------
+
+DECLARE databases CURSOR LOCAL FAST_FORWARD FOR
+
+SELECT
+    d.name
+FROM sys.databases AS d
+
+WHERE d.database_id > 4
+
+  -- Kun online databaser
+  AND d.state_desc = N'ONLINE'
+
+  -- Ingen snapshots
+  AND d.source_database_id IS NULL
+
+  -- Minimum 180 dage siden oprettelse
+  AND d.create_date <= DATEADD(DAY, -180, GETDATE())
+
+  -- DBA-databaser der skal ignoreres
+  AND d.name NOT IN
+  (
+      N'DBA'
+  )
+
+  ----------------------------------------------------------
+  -- Standalone
+  --
+  -- ELLER
+  --
+  -- AG database hvor denne server er PRIMARY
+  ----------------------------------------------------------
+
+  AND
+  (
+      NOT EXISTS
+      (
+          SELECT 1
+          FROM sys.availability_databases_cluster AS adc
+          WHERE adc.database_name = d.name
+      )
+
+      OR EXISTS
+      (
+          SELECT 1
+          FROM sys.dm_hadr_database_replica_states AS drs
+          WHERE drs.database_id = d.database_id
+            AND drs.is_local = 1
+            AND drs.is_primary_replica = 1
+      )
+  );
+
+
+------------------------------------------------------------
+-- Gennemgå databaser
+------------------------------------------------------------
+
+OPEN databases;
+
+FETCH NEXT FROM databases
+INTO @Database;
+
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+    SET @SQL = N'
+        USE ' + QUOTENAME(@Database) + N';
+
+        IF NOT EXISTS
+        (
+            SELECT 1
+            FROM sys.objects
+            WHERE is_ms_shipped = 0
+              AND type NOT IN
+              (
+                  N''S'',   -- System table
+                  N''IT''   -- Internal table
+              )
+        )
+        BEGIN
+            SET @Count = @Count + 1;
+        END;';
+
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@Count int OUTPUT',
+        @Count = @EmptyDatabases OUTPUT;
+
+
+    FETCH NEXT FROM databases
+    INTO @Database;
+
+END;
+
+
+------------------------------------------------------------
+-- Cleanup
+------------------------------------------------------------
+
+CLOSE databases;
+DEALLOCATE databases;
+
+
+------------------------------------------------------------
+-- Resultat til Zabbix
+------------------------------------------------------------
+
+SELECT
+    @EmptyDatabases AS databases_without_user_objects;
