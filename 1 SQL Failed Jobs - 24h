@@ -1,0 +1,35 @@
+SET NOCOUNT ON;
+
+DECLARE @Now datetime;
+SET @Now = GETDATE();
+
+SELECT
+    COUNT(DISTINCT FailedRuns.job_id) AS FailedJobs24h
+FROM
+(
+    SELECT
+        h.job_id,
+        DATEADD(
+            SECOND,
+            (h.run_duration / 10000) * 3600
+            + ((h.run_duration % 10000) / 100) * 60
+            + (h.run_duration % 100),
+            DATEADD(
+                SECOND,
+                (h.run_time / 10000) * 3600
+                + ((h.run_time % 10000) / 100) * 60
+                + (h.run_time % 100),
+                CONVERT(
+                    datetime,
+                    CONVERT(varchar(8), h.run_date),
+                    112
+                )
+            )
+        ) AS FinishedAt
+    FROM msdb.dbo.sysjobhistory AS h
+    WHERE h.step_id = 0
+      AND h.run_status = 0
+      AND h.run_date > 0
+) AS FailedRuns
+WHERE FailedRuns.FinishedAt >= DATEADD(HOUR, -24, @Now)
+  AND FailedRuns.FinishedAt <= @Now;
