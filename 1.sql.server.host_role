@@ -1,0 +1,98 @@
+
+/*
+===============================================================================
+ZABBIX SQL SERVER MONITORING - VERSION 1.0
+===============================================================================
+Name         : 1.sql.server.host_role
+Purpose      : Identify whether the SQL Server instance is
+               standalone or participates in Always On
+               Availability Groups as primary or secondary.
+
+ODBC Key     : db.odbc.select[1.sql.server.host_role,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+
+Interval     : 5m
+History      : 90d
+Trends       : Not applicable
+Type         : Character
+Compatibility: SQL Server 2012+
+
+AG Handling  : Evaluates local Availability Group replica roles.
+
+Notes        : Returns:
+                 SQL  = Standalone / no local AG replica
+                 AG_P = Local primary replica exists
+                 AG_S = Local secondary replica exists
+                 AG_U = Local AG replica role unknown
+
+               If multiple AGs exist, PRIMARY takes precedence
+               over SECONDARY.
+
+               Requires appropriate permissions to query
+               Always On DMVs.
+               Returns one character value.
+===============================================================================
+*/
+
+SET NOCOUNT ON;
+
+DECLARE @Role varchar(5) = 'SQL';
+
+------------------------------------------------------------
+-- Check whether Always On is enabled
+------------------------------------------------------------
+
+IF SERVERPROPERTY('IsHadrEnabled') = 1
+BEGIN
+
+    --------------------------------------------------------
+    -- Local primary replica
+    --------------------------------------------------------
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM sys.dm_hadr_availability_replica_states
+        WHERE is_local = 1
+          AND role_desc = N'PRIMARY'
+    )
+    BEGIN
+        SET @Role = 'AG_P';
+    END
+
+    --------------------------------------------------------
+    -- Local secondary replica
+    --------------------------------------------------------
+
+    ELSE IF EXISTS
+    (
+        SELECT 1
+        FROM sys.dm_hadr_availability_replica_states
+        WHERE is_local = 1
+          AND role_desc = N'SECONDARY'
+    )
+    BEGIN
+        SET @Role = 'AG_S';
+    END
+
+    --------------------------------------------------------
+    -- Local replica exists, but role is unknown
+    --------------------------------------------------------
+
+    ELSE IF EXISTS
+    (
+        SELECT 1
+        FROM sys.dm_hadr_availability_replica_states
+        WHERE is_local = 1
+    )
+    BEGIN
+        SET @Role = 'AG_U';
+    END
+
+END;
+
+------------------------------------------------------------
+-- Return host role to Zabbix
+------------------------------------------------------------
+
+SELECT
+    @Role AS host_status;
