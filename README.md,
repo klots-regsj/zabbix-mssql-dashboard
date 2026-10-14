@@ -1,0 +1,113 @@
+# Zabbix SQL Server Monitoring
+
+A collection of SQL Server monitoring queries designed for Zabbix using ODBC.
+
+Supports SQL Server 2012 and newer, including standalone instances and Always On Availability Groups.
+
+## Version 1.0 – Standards
+
+### 1. Naming conventions
+
+All custom Zabbix items follow this naming convention:
+
+`<category>.sql.<component>.<metric>`
+
+| Category | Description |
+|---|---|
+| 1 | Server information and configuration |
+| 2 | Databases and database activity |
+| 3 | Always On Availability Groups |
+| 4 | Storage and capacity |
+| 5 | Performance and wait statistics |
+| 6 | SQL Agent jobs |
+| 7 | Security, logins and permissions |
+| 8 | Maintenance and updates |
+| 9 | DBA-specific monitoring |
+
+Examples:
+
+- `1.sql.server.version`
+- `2.sql.database.low_compat_count`
+- `3.sql.ag.primary_count`
+- `4.sql.storage.free_gb`
+- `5.sql.performance.cpu_utilization`
+
+These are Zabbix item display names. Existing ODBC item keys can remain unchanged.
+
+### 2. Monitoring intervals and retention
+
+| Update interval | History | Trends |
+|---|---|---|
+| 1m | 31d | 365d |
+| 5m | 90d | 365d |
+| 15m | 180d | 365d |
+| 1h | 365d | 730d |
+| 24h | 730d | 1825d |
+
+History stores individual measurements. Trends store hourly aggregated numeric values.
+
+Retention values are defaults and may be adjusted for individual monitoring requirements.
+
+### 3. SQL script requirements
+
+Every SQL script must:
+
+- Support SQL Server 2012 or newer unless explicitly documented otherwise.
+- Support standalone SQL Server instances.
+- Handle Always On Availability Groups correctly.
+- Return one numeric value for scalar monitoring items.
+- Exclude system databases when counting user databases.
+- Avoid misleading zero values when monitoring data cannot be determined.
+- Include a standardized documentation header.
+- Use `SET NOCOUNT ON` where appropriate.
+
+### 4. Standard SQL header
+
+```sql
+/*
+===============================================================================
+ZABBIX SQL SERVER MONITORING
+===============================================================================
+Name         : 2.sql.database.low_compat_count
+Original     : 1 Count COMPLVL
+Purpose      : Count databases below the native compatibility level.
+Interval     : 1h
+History      : 365d
+Trends       : 730d
+Compatibility: SQL Server 2012+
+Notes        : Supports standalone and Always On configurations.
+===============================================================================
+*/
+```
+
+### 5. Availability Group handling
+
+Database monitoring queries should distinguish between:
+
+- Standalone databases
+- Local AG primary databases
+- Local AG secondary databases
+
+For database inventory and count metrics, standalone and local AG primary databases are counted by default, unless the metric explicitly requires secondary replicas.
+
+AG health and replication monitoring may collect metrics on all relevant replicas.
+
+### 6. Versioning
+
+**Version 1.0**
+
+Initial standardized release with consistent naming, monitoring intervals, retention policies and SQL documentation.
+
+The original beta item names are retained in SQL script headers to simplify migration.
+
+### 7. Migration from beta
+
+During migration:
+
+1. Rename the Zabbix item display name.
+2. Preserve the existing item key where possible.
+3. Apply the new update interval, history and trends.
+4. Update the SQL query where required.
+5. Verify the returned value and existing trigger dependencies.
+6. Confirm the item is collecting data successfully.
+
