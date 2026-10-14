@@ -4,7 +4,6 @@
 ZABBIX SQL SERVER MONITORING - VERSION 1.0
 ===============================================================================
 Name         : 2.sql.database.low_compat_count
-Original     : 1 Count COMPLVL
 Purpose      : Count online user databases running at a compatibility
                level below the native SQL Server compatibility level.
 
