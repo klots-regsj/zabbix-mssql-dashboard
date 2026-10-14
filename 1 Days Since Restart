@@ -1,3 +1,0 @@
-SELECT
-    DATEDIFF(DAY, sqlserver_start_time, GETDATE()) AS days_since_last_restart
-FROM sys.dm_os_sys_info;
