@@ -1,7 +1,7 @@
 
 /*
 ===============================================================================
-ZABBIX SQL SERVER MONITORING - VERSION 1.0
+ZABBIX SQL SERVER MONITORING - VERSION 1.1
 ===============================================================================
 Name         : 1.sql.server.enterprise_license_assessment
 Purpose      : Identify Enterprise Edition instances that may
@@ -15,24 +15,20 @@ Trends       : Not applicable
 Type         : Character
 Compatibility: SQL Server 2016+
 
-AG Handling  : Evaluates local Availability Group configuration.
+AG Handling  : Returns AG when the local instance participates
+               in at least one Availability Group.
 
-Notes        : ENT->STD = Potential Standard Edition candidate.
-               RIGHT    = Known Enterprise-only requirement.
-               NOT-ENT  = Not Enterprise Edition.
+Notes        : AG       = Local AG participation detected.
+               RIGHT    = Other Enterprise-only feature detected.
                REVIEW   = Further DBA assessment required.
+               ENT->STD = Potential Standard Edition candidate.
+               NOT-ENT  = Not Enterprise Edition.
 
-               SQL Server 2016 SP1+ supports partitioning
-               and data compression in Standard Edition.
-
-               Checks configured memory and AG presence.
-               SQL Server 2016 RTM additionally checks
-               partitioning and compression.
+               AG takes precedence over other assessments.
+               AG does not independently prove that
+               Enterprise licensing is required.
 
                This is a technical screening only.
-               It does not validate all edition limits,
-               features or licensing requirements.
-               Returns one character value.
 ===============================================================================
 */
 
@@ -47,6 +43,7 @@ DECLARE @MaxMemoryMB bigint;
 DECLARE @DatabaseName sysname;
 DECLARE @SQL nvarchar(max);
 DECLARE @HasLegacyFeatures bit = 0;
+DECLARE @IsAG bit = 0;
 
 ------------------------------------------------------------
 -- 1. Identify edition and version
@@ -73,10 +70,29 @@ BEGIN
 END;
 
 ------------------------------------------------------------
--- 3. Check configured maximum server memory
---
--- Standard Edition memory limit: 128 GB
--- A configured value above this limit requires review.
+-- 3. Check local AG participation
+------------------------------------------------------------
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.dm_hadr_availability_replica_states
+    WHERE is_local = 1
+)
+BEGIN
+    SET @IsAG = 1;
+END;
+
+IF @IsAG = 1
+BEGIN
+    SELECT
+        CAST('AG' AS varchar(16))
+            AS enterprise_license_assessment;
+    RETURN;
+END;
+
+------------------------------------------------------------
+-- 4. Check configured maximum server memory
 ------------------------------------------------------------
 
 SELECT
@@ -90,36 +106,15 @@ BEGIN
 END;
 
 ------------------------------------------------------------
--- 4. Check Availability Groups
---
--- Standard Edition supports Basic Availability Groups.
--- Other AG configurations may require Enterprise.
-------------------------------------------------------------
-
-IF EXISTS
-(
-    SELECT 1
-    FROM sys.availability_groups
-)
-BEGIN
-    SET @RequiresReview = 1;
-END;
-
-------------------------------------------------------------
 -- 5. SQL Server 2016 RTM feature check
---
--- Partitioning and compression became available in
--- Standard Edition starting with SQL Server 2016 SP1.
 ------------------------------------------------------------
 
 IF @MajorVersion = 13
    AND @ProductLevel = N'RTM'
 BEGIN
-
     DECLARE database_cursor CURSOR LOCAL FAST_FORWARD FOR
 
-    SELECT
-        d.name
+    SELECT d.name
     FROM sys.databases AS d
     WHERE d.database_id > 4
       AND d.state_desc = N'ONLINE'
@@ -143,12 +138,10 @@ BEGIN
       );
 
     OPEN database_cursor;
-
     FETCH NEXT FROM database_cursor INTO @DatabaseName;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-
         SET @SQL = N'
             USE ' + QUOTENAME(@DatabaseName) + N';
 
@@ -159,27 +152,20 @@ BEGIN
                 WHERE partition_number > 1
                    OR data_compression > 0
             )
-            BEGIN
                 SET @Found = 1;
-            END;
         ';
 
         BEGIN TRY
-
             EXEC sys.sp_executesql
                 @SQL,
                 N'@Found bit OUTPUT',
                 @Found = @HasLegacyFeatures OUTPUT;
-
         END TRY
         BEGIN CATCH
-
             SET @RequiresReview = 1;
-
         END CATCH;
 
         FETCH NEXT FROM database_cursor INTO @DatabaseName;
-
     END;
 
     CLOSE database_cursor;
@@ -187,7 +173,6 @@ BEGIN
 
     IF @HasLegacyFeatures = 1
         SET @RequiresEnterprise = 1;
-
 END;
 
 ------------------------------------------------------------
@@ -198,12 +183,8 @@ SELECT
     CAST
     (
         CASE
-            WHEN @RequiresEnterprise = 1
-                THEN 'RIGHT'
-
-            WHEN @RequiresReview = 1
-                THEN 'REVIEW'
-
+            WHEN @RequiresEnterprise = 1 THEN 'RIGHT'
+            WHEN @RequiresReview = 1 THEN 'REVIEW'
             ELSE 'ENT->STD'
         END
         AS varchar(16)
