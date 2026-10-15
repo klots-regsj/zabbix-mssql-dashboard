@@ -1,7 +1,7 @@
 
 /*
 ===============================================================================
-ZABBIX SQL SERVER MONITORING - VERSION 1.0
+ZABBIX SQL SERVER MONITORING - VERSION 1.1
 ===============================================================================
 Name         : 7.sql.security.orphaned_users
 Purpose      : Count instance-authenticated SQL database users
@@ -27,8 +27,9 @@ Notes        : Counts SQL database users authenticated
                Windows users and Windows groups.
                Excludes system databases, snapshots,
                offline databases and DBA% databases.
-               Requires sufficient metadata visibility
-               in all included databases.
+               Skips databases where HAS_DBACCESS <> 1.
+               Skips databases that fail during collection.
+               Requires sufficient metadata visibility.
                Returns one integer.
 ===============================================================================
 */
@@ -36,11 +37,12 @@ Notes        : Counts SQL database users authenticated
 SET NOCOUNT ON;
 
 DECLARE @OrphanedUsers int = 0;
+DECLARE @DatabaseCount int;
 DECLARE @Database sysname;
 DECLARE @SQL nvarchar(max);
 
 ------------------------------------------------------------
--- Find eligible databases
+-- Find eligible and accessible databases
 ------------------------------------------------------------
 
 DECLARE databases CURSOR LOCAL FAST_FORWARD FOR
@@ -52,6 +54,7 @@ WHERE d.database_id > 4
   AND d.state_desc = N'ONLINE'
   AND d.source_database_id IS NULL
   AND d.name NOT LIKE N'DBA%'
+  AND HAS_DBACCESS(d.name) = 1
   AND
   (
       d.replica_id IS NULL
@@ -81,38 +84,58 @@ FETCH NEXT FROM databases INTO @Database;
 WHILE @@FETCH_STATUS = 0
 BEGIN
 
+    SET @DatabaseCount = 0;
+
     SET @SQL = N'
-        USE ' + QUOTENAME(@Database) + N';
+USE ' + QUOTENAME(@Database) + N';
 
-        SELECT
-            @Count = @Count + COUNT(*)
-        FROM sys.database_principals AS dp
-        WHERE dp.type = N''S''
-          AND dp.authentication_type_desc = N''INSTANCE''
-          AND dp.principal_id > 4
+SELECT
+    @Count = COUNT(*)
+FROM sys.database_principals AS dp
+WHERE dp.type = N''S''
+  AND dp.authentication_type_desc = N''INSTANCE''
+  AND dp.principal_id > 4
 
-          -- Exclude built-in database principals
-          AND dp.name NOT IN
-          (
-              N''dbo'',
-              N''guest'',
-              N''INFORMATION_SCHEMA'',
-              N''sys''
-          )
+  -- Exclude built-in database principals
+  AND dp.name NOT IN
+  (
+      N''dbo'',
+      N''guest'',
+      N''INFORMATION_SCHEMA'',
+      N''sys''
+  )
 
-          -- No corresponding SQL Server login
-          AND NOT EXISTS
-          (
-              SELECT 1
-              FROM sys.sql_logins AS sl
-              WHERE sl.sid = dp.sid
-          );
-    ';
+  -- No corresponding SQL Server login
+  AND NOT EXISTS
+  (
+      SELECT 1
+      FROM sys.sql_logins AS sl
+      WHERE sl.sid = dp.sid
+  );
+';
 
-    EXEC sys.sp_executesql
-        @SQL,
-        N'@Count int OUTPUT',
-        @Count = @OrphanedUsers OUTPUT;
+    BEGIN TRY
+
+        EXEC sys.sp_executesql
+            @SQL,
+            N'@Count int OUTPUT',
+            @Count = @DatabaseCount OUTPUT;
+
+        ----------------------------------------------------
+        -- Add only successfully collected results
+        ----------------------------------------------------
+
+        SET @OrphanedUsers =
+            @OrphanedUsers + ISNULL(@DatabaseCount, 0);
+
+    END TRY
+    BEGIN CATCH
+
+        ----------------------------------------------------
+        -- Skip databases that cannot be queried
+        ----------------------------------------------------
+
+    END CATCH;
 
     FETCH NEXT FROM databases INTO @Database;
 
