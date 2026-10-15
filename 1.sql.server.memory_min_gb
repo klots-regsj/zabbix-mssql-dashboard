@@ -1,7 +1,7 @@
 
 /*
 ===============================================================================
-ZABBIX SQL SERVER MONITORING - VERSION 1.0
+ZABBIX SQL SERVER MONITORING - VERSION 1.1
 ===============================================================================
 Name         : 1.sql.server.memory_min_gb
 Purpose      : Return the active SQL Server minimum memory
@@ -19,11 +19,12 @@ Compatibility: SQL Server 2012+
 AG Handling  : Not applicable. Instance-level metric.
 
 Notes        : Uses sys.configurations.value_in_use.
+               Explicitly converts sql_variant to bigint.
                Converts MB to GB with two decimal places.
                Returns the configured minimum memory,
                not the actual memory currently allocated.
                A value of 0 means no configured minimum.
-               Returns one decimal value.
+               Returns one numeric value.
 ===============================================================================
 */
 
@@ -36,7 +37,7 @@ SET NOCOUNT ON;
 SELECT
     CAST
     (
-        value_in_use / 1024.0
+        CONVERT(bigint, value_in_use) / 1024.0
         AS decimal(18,2)
     ) AS memory_min_gb
 FROM sys.configurations
