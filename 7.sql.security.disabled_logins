@@ -17,14 +17,14 @@ Compatibility: SQL Server 2012+
 
 AG Handling  : Not applicable. Instance-level metric.
 
-Notes        : Uses sys.server_principals.
-               Includes SQL logins, Windows logins and groups.
-               Excludes sa, internal system logins and
-               selected Windows service accounts.
-               Counts only principals marked as disabled.
-               Does not indicate whether a login is used.
-               Requires sufficient metadata visibility.
-               Returns one integer.
+Notes        : Identifies disabled logins retained on the
+               SQL Server instance.
+               Disabled logins may be re-enabled by an
+               administrator with sufficient permissions.
+               Intended to identify accounts for review
+               and potential permanent removal.
+               Excludes sa and internal service accounts.
+               Does not automatically delete any logins.
 ===============================================================================
 */
 
