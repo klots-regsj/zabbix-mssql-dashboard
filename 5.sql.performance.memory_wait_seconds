@@ -1,0 +1,302 @@
+
+/*
+===============================================================================
+ZABBIX SQL SERVER MONITORING - VERSION 1.0
+===============================================================================
+Name         : 5.sql.performance.memory_wait_seconds
+Purpose      : Return total Query Store Memory wait time
+               in seconds for the previous completed UTC hour
+               across eligible user databases.
+
+ODBC Key     : db.odbc.select[5.sql.performance.memory_wait_seconds,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+
+Interval     : 1h
+History      : 365d
+Trends       : 730d
+Type         : Numeric (float)
+Units        : s
+Compatibility: SQL Server 2019+
+
+AG Handling  : Includes standalone databases and local
+               AG primary replicas only.
+               Excludes AG secondary databases.
+
+Notes        : Uses sys.query_store_wait_stats.
+               Wait category 17 = Memory.
+               Requires Query Store READ_WRITE.
+               Requires wait statistics capture ON.
+               Requires 60-minute Query Store intervals.
+               Uses a common completed UTC-hour window.
+               Converts milliseconds to seconds.
+               Excludes system, DBA%, offline and snapshot
+               databases.
+               Skips databases where Query Store is OFF.
+               Returns zero when no Memory waits exist.
+               Raises an error for incomplete collection.
+               Requires sufficient Query Store permissions.
+               Returns one decimal value.
+===============================================================================
+*/
+
+SET NOCOUNT ON;
+
+------------------------------------------------------------
+-- Require SQL Server 2019 or newer
+------------------------------------------------------------
+
+IF COALESCE
+(
+    TRY_CONVERT
+    (
+        int,
+        SERVERPROPERTY('ProductMajorVersion')
+    ),
+    0
+) < 15
+BEGIN
+    THROW 50000,
+        'SQL Server 2019 or newer is required.',
+        1;
+END;
+
+------------------------------------------------------------
+-- Define previous completed UTC hour
+------------------------------------------------------------
+
+DECLARE @HourEnd datetimeoffset(7);
+DECLARE @HourStart datetimeoffset(7);
+
+SET @HourEnd = TODATETIMEOFFSET
+(
+    DATEADD
+    (
+        HOUR,
+        DATEDIFF
+        (
+            HOUR,
+            CONVERT(datetime, '20000101', 112),
+            SYSUTCDATETIME()
+        ),
+        CONVERT(datetime, '20000101', 112)
+    ),
+    '+00:00'
+);
+
+SET @HourStart = DATEADD(HOUR, -1, @HourEnd);
+
+------------------------------------------------------------
+-- Temporary result table
+------------------------------------------------------------
+
+CREATE TABLE #MemoryWaits
+(
+    DatabaseName sysname NOT NULL,
+    MemoryWaitSeconds decimal(28,3) NOT NULL
+);
+
+DECLARE @DatabaseName sysname;
+DECLARE @SQL nvarchar(max);
+DECLARE @ErrorMessage nvarchar(2048);
+
+------------------------------------------------------------
+-- Find eligible databases
+------------------------------------------------------------
+
+DECLARE DatabaseCursor CURSOR LOCAL FAST_FORWARD FOR
+
+SELECT
+    d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+  AND d.state_desc = N'ONLINE'
+  AND d.source_database_id IS NULL
+  AND d.name NOT LIKE N'DBA%'
+  AND
+  (
+      d.replica_id IS NULL
+
+      OR EXISTS
+      (
+          SELECT 1
+          FROM sys.dm_hadr_database_replica_states AS drs
+          INNER JOIN sys.dm_hadr_availability_replica_states AS ars
+              ON ars.group_id = drs.group_id
+             AND ars.replica_id = drs.replica_id
+          WHERE drs.database_id = d.database_id
+            AND drs.is_local = 1
+            AND ars.is_local = 1
+            AND ars.role = 1
+      )
+  );
+
+------------------------------------------------------------
+-- Collect Query Store Memory waits
+------------------------------------------------------------
+
+BEGIN TRY
+
+    OPEN DatabaseCursor;
+
+    FETCH NEXT FROM DatabaseCursor INTO @DatabaseName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+
+        IF ISNULL(HAS_DBACCESS(@DatabaseName), 0) <> 1
+        BEGIN
+            SET @ErrorMessage =
+                N'Database access unavailable: '
+                + @DatabaseName;
+
+            THROW 50004, @ErrorMessage, 1;
+        END;
+
+        SET @SQL = N'
+USE ' + QUOTENAME(@DatabaseName) + N';
+
+DECLARE @ErrorMessage nvarchar(2048);
+DECLARE @IntervalId bigint;
+
+------------------------------------------------------------
+-- Skip databases where Query Store is OFF
+------------------------------------------------------------
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.database_query_store_options
+    WHERE actual_state_desc <> N''OFF''
+)
+BEGIN
+    RETURN;
+END;
+
+------------------------------------------------------------
+-- Validate Query Store configuration
+------------------------------------------------------------
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.database_query_store_options
+    WHERE actual_state_desc = N''READ_WRITE''
+      AND interval_length_minutes = 60
+      AND wait_stats_capture_mode_desc = N''ON''
+)
+BEGIN
+    SET @ErrorMessage =
+        N''Incompatible Query Store configuration: ''
+        + DB_NAME();
+
+    THROW 50001, @ErrorMessage, 1;
+END;
+
+------------------------------------------------------------
+-- Find interval matching previous UTC hour
+------------------------------------------------------------
+
+SELECT TOP (1)
+    @IntervalId = runtime_stats_interval_id
+FROM sys.query_store_runtime_stats_interval
+WHERE start_time = @HourStart
+  AND end_time = @HourEnd;
+
+IF @IntervalId IS NULL
+BEGIN
+    SET @ErrorMessage =
+        N''No Query Store interval for previous UTC hour: ''
+        + DB_NAME();
+
+    THROW 50002, @ErrorMessage, 1;
+END;
+
+------------------------------------------------------------
+-- Collect Memory wait time
+------------------------------------------------------------
+
+INSERT INTO #MemoryWaits
+(
+    DatabaseName,
+    MemoryWaitSeconds
+)
+SELECT
+    DB_NAME(),
+    CAST
+    (
+        COALESCE
+        (
+            SUM
+            (
+                CAST
+                (
+                    total_query_wait_time_ms
+                    AS decimal(28,3)
+                )
+            ),
+            0
+        ) / 1000.0
+        AS decimal(28,3)
+    )
+FROM sys.query_store_wait_stats
+WHERE runtime_stats_interval_id = @IntervalId
+  AND wait_category = 17;
+';
+
+        EXEC sys.sp_executesql
+            @SQL,
+            N'@HourStart datetimeoffset(7),
+              @HourEnd datetimeoffset(7)',
+            @HourStart = @HourStart,
+            @HourEnd = @HourEnd;
+
+        FETCH NEXT FROM DatabaseCursor INTO @DatabaseName;
+
+    END;
+
+    CLOSE DatabaseCursor;
+    DEALLOCATE DatabaseCursor;
+
+    --------------------------------------------------------
+    -- Require at least one collected database
+    --------------------------------------------------------
+
+    IF NOT EXISTS
+    (
+        SELECT 1
+        FROM #MemoryWaits
+    )
+    BEGIN
+        THROW 50003,
+            'No eligible databases with Query Store data.',
+            1;
+    END;
+
+    --------------------------------------------------------
+    -- Return total Memory wait time
+    --------------------------------------------------------
+
+    SELECT
+        CAST
+        (
+            SUM(MemoryWaitSeconds)
+            AS decimal(28,3)
+        ) AS memory_wait_seconds
+    FROM #MemoryWaits;
+
+    DROP TABLE #MemoryWaits;
+
+END TRY
+BEGIN CATCH
+
+    IF CURSOR_STATUS('local', 'DatabaseCursor') >= 0
+        CLOSE DatabaseCursor;
+
+    IF CURSOR_STATUS('local', 'DatabaseCursor') >= -1
+        DEALLOCATE DatabaseCursor;
+
+    IF OBJECT_ID('tempdb..#MemoryWaits') IS NOT NULL
+        DROP TABLE #MemoryWaits;
+
+    THROW;
+
+END CATCH;
