@@ -7,7 +7,7 @@ Name         : 1.sql.server.enterprise_license_assessment
 Purpose      : Identify Enterprise Edition instances that may
                be candidates for SQL Server Standard Edition.
 
-ODBC Key     : db.odbc.select[1.sql.server.enterprise_license_assessment,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+ODBC Key     : db.odbc.select[1.sql.server.enterprise_license_assessment,,"Driver={$MSSQL.ODBC.DRIVER};Server=tcp:{$MSSQL.HOST},{$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
 
 Interval     : 24h
 History      : 730d
