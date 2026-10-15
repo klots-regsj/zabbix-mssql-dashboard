@@ -17,24 +17,26 @@ Permissions  : VIEW SERVER STATE
                VIEW ANY DEFINITION
                VIEW SERVER PERFORMANCE STATE (SQL 2022+)
                VIEW ANY SECURITY DEFINITION (SQL 2022+)
-               CONNECT and VIEW DEFINITION in databases
+               CONNECT and VIEW DEFINITION in user databases
                VIEW DATABASE STATE (SQL 2012-2019)
                VIEW DATABASE PERFORMANCE STATE (SQL 2022+)
                SQLAgentReaderRole in msdb
                SELECT on msdb.dbo.sysjobhistory
+               db_datareader in DBA database
 
-AG Handling  : Creates users on standalone databases
-               and local AG primary replicas.
-               Does not create users on AG secondaries.
-               Existing AG database users are replicated
-               through the availability group.
-               Requires matching login SIDs on replicas.
+AG Handling  : Configures standalone databases and local
+               AG primary replicas.
+               Skips AG secondary databases.
+               Existing AG database users are replicated.
+               Matching login SIDs are required on replicas.
 
 Notes        : Idempotent.
                Does not grant sysadmin or db_owner.
-               Does not grant access to application tables.
+               Does not grant read access to application
+               tables outside the DBA database.
                Skips offline databases and snapshots.
                Reports database-level errors.
+               Does not change SQL Agent jobs.
                Does not change Query Store configuration.
 ===============================================================================
 */
@@ -62,7 +64,6 @@ DECLARE @ResetExistingPassword bit = 0;
 
 DECLARE @SQL nvarchar(max);
 DECLARE @Database sysname;
-DECLARE @ErrorMessage nvarchar(2048);
 
 DECLARE @MajorVersion int =
     TRY_CONVERT
@@ -73,8 +74,9 @@ DECLARE @MajorVersion int =
 
 DECLARE @LoginCreated bit = 0;
 DECLARE @UpdatedDatabases int = 0;
-DECLARE @SkippedDatabases int = 0;
 DECLARE @ErrorDatabases int = 0;
+
+DECLARE @DBAReadAccess varchar(20) = 'NOT FOUND';
 
 DECLARE @DatabaseResults TABLE
 (
@@ -103,16 +105,10 @@ END;
 
 IF @Password IS NULL
    OR @Password = N'CHANGE_ME_TO_A_STRONG_PASSWORD'
+   OR LEN(@Password) = 0
 BEGIN
     THROW 50002,
         'Configure a password before execution.',
-        1;
-END;
-
-IF LEN(@Password) = 0
-BEGIN
-    THROW 50003,
-        'Password cannot be empty.',
         1;
 END;
 
@@ -224,6 +220,7 @@ IF NOT EXISTS
     WHERE name = @UserName
 )
 BEGIN
+
     DECLARE @CreateSQL nvarchar(max);
 
     SET @CreateSQL =
@@ -231,12 +228,10 @@ BEGIN
         N'' FOR LOGIN '' + QUOTENAME(@UserName);
 
     EXEC sys.sp_executesql @CreateSQL;
+
 END
 ELSE
 BEGIN
-    --------------------------------------------------------
-    -- Ensure existing user is mapped to the correct login
-    --------------------------------------------------------
 
     DECLARE @UserSID varbinary(85);
     DECLARE @LoginSID varbinary(85);
@@ -251,6 +246,7 @@ BEGIN
 
     IF @UserSID <> @LoginSID
     BEGIN
+
         DECLARE @AlterSQL nvarchar(max);
 
         SET @AlterSQL =
@@ -258,7 +254,9 @@ BEGIN
             N'' WITH LOGIN = '' + QUOTENAME(@UserName);
 
         EXEC sys.sp_executesql @AlterSQL;
+
     END;
+
 END;
 ';
 
@@ -286,9 +284,11 @@ IF NOT EXISTS
       AND u.name = @UserName
 )
 BEGIN
+
     EXEC sys.sp_addrolemember
         @rolename = N''SQLAgentReaderRole'',
         @membername = @UserName;
+
 END;
 ';
 
@@ -314,7 +314,7 @@ EXEC sys.sp_executesql @SQL;
 -- Includes:
 --   Standalone databases
 --   Local AG primary databases
---   Read-only databases where permissions can be changed
+--   DBA database
 --
 -- Excludes:
 --   System databases
@@ -376,6 +376,7 @@ IF NOT EXISTS
     WHERE name = @UserName
 )
 BEGIN
+
     DECLARE @CreateSQL nvarchar(max);
 
     SET @CreateSQL =
@@ -383,9 +384,11 @@ BEGIN
         N'' FOR LOGIN '' + QUOTENAME(@UserName);
 
     EXEC sys.sp_executesql @CreateSQL;
+
 END
 ELSE
 BEGIN
+
     DECLARE @UserSID varbinary(85);
     DECLARE @LoginSID varbinary(85);
 
@@ -399,6 +402,7 @@ BEGIN
 
     IF @UserSID <> @LoginSID
     BEGIN
+
         DECLARE @AlterSQL nvarchar(max);
 
         SET @AlterSQL =
@@ -406,7 +410,9 @@ BEGIN
             N'' WITH LOGIN = '' + QUOTENAME(@UserName);
 
         EXEC sys.sp_executesql @AlterSQL;
+
     END;
+
 END;
 ';
 
@@ -453,6 +459,52 @@ END;
 
         EXEC sys.sp_executesql @SQL;
 
+        ----------------------------------------------------
+        -- DBA database: grant db_datareader
+        --
+        -- Read access to all user tables and views
+        -- in DBA, including dbo.LoginActivity.
+        ----------------------------------------------------
+
+        IF @Database = N'DBA'
+        BEGIN
+
+            SET @SQL = N'
+USE [DBA];
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.database_role_members AS drm
+    INNER JOIN sys.database_principals AS r
+        ON r.principal_id = drm.role_principal_id
+    INNER JOIN sys.database_principals AS u
+        ON u.principal_id = drm.member_principal_id
+    WHERE r.name = N''db_datareader''
+      AND u.name = @UserName
+)
+BEGIN
+
+    EXEC sys.sp_addrolemember
+        @rolename = N''db_datareader'',
+        @membername = @UserName;
+
+END;
+';
+
+            EXEC sys.sp_executesql
+                @SQL,
+                N'@UserName sysname',
+                @UserName = @LoginName;
+
+            SET @DBAReadAccess = 'GRANTED';
+
+        END;
+
+        ----------------------------------------------------
+        -- Record successful database configuration
+        ----------------------------------------------------
+
         SET @UpdatedDatabases =
             @UpdatedDatabases + 1;
 
@@ -466,7 +518,11 @@ END;
         (
             @Database,
             N'OK',
-            N'Permissions configured'
+            CASE
+                WHEN @Database = N'DBA'
+                THEN N'Permissions configured; db_datareader granted'
+                ELSE N'Permissions configured'
+            END
         );
 
     END TRY
@@ -474,6 +530,11 @@ END;
 
         SET @ErrorDatabases =
             @ErrorDatabases + 1;
+
+        IF @Database = N'DBA'
+        BEGIN
+            SET @DBAReadAccess = 'ERROR';
+        END;
 
         INSERT INTO @DatabaseResults
         (
@@ -505,12 +566,16 @@ SELECT
     @@SERVERNAME AS ServerName,
     @MajorVersion AS SQLMajorVersion,
     @LoginName AS LoginName,
+
     CASE
         WHEN @LoginCreated = 1 THEN N'CREATED'
         ELSE N'EXISTING'
     END AS LoginStatus,
+
     @UpdatedDatabases AS UpdatedDatabases,
     @ErrorDatabases AS ErrorDatabases,
+    @DBAReadAccess AS DBAReadAccess,
+
     CASE
         WHEN @ErrorDatabases = 0 THEN N'OK'
         ELSE N'PARTIAL'
