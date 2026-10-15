@@ -12,7 +12,7 @@ ODBC Key     : db.odbc.select[1.sql.server.enterprise_license_assessment,,"Drive
 Interval     : 24h
 History      : 730d
 Trends       : Not applicable
-Type         : Character
+Type         : String
 Compatibility: SQL Server 2016+
 
 AG Handling  : Returns AG when the local instance participates
