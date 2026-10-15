@@ -1,67 +1,160 @@
 
 /*
 ===============================================================================
-ZABBIX SQL SERVER MONITORING - VERSION 1.0
+ZABBIX SQL SERVER MONITORING - VERSION 1.1
 ===============================================================================
 Name         : 3.sql.ag.failover_readiness
-Purpose      : Report failover readiness for databases
-               on local AG secondary replicas.
+Purpose      : Report automatic failover readiness for local
+               SQL Server Availability Group replicas.
 
 ODBC Key     : db.odbc.select[3.sql.ag.failover_readiness,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
 
 Interval     : 5m
 History      : 90d
 Trends       : Not applicable
-Type         : Character
+Type         : Text
 Compatibility: SQL Server 2012+
 
-AG Handling  : Includes local AG secondary replicas only.
-               Excludes primary and remote replica rows.
+AG Handling  : Evaluates local AG primary and secondary replicas.
+               On primary, checks whether a synchronous automatic
+               failover partner is connected and synchronized.
+               On secondary, reports SECONDARY.
 
 Values       : READY
                NOT_READY
+               SECONDARY
                NOT_IN_AG
+               UNKNOWN
 
-Notes        : Uses sys.dm_hadr_database_replica_cluster_states.
-               Checks is_failover_ready for all qualifying
-               databases on local secondary replicas.
-               Returns NOT_READY if any database is not ready.
-               Returns NOT_IN_AG if no local secondary exists.
-               Readiness does not guarantee successful failover.
-               Requires sufficient server permissions.
+Notes        : READY requires at least one eligible automatic
+               failover partner for every local primary AG.
+               NOT_READY indicates no eligible partner for
+               at least one local primary AG.
+               SECONDARY indicates no local primary AG.
+               UNKNOWN indicates an indeterminate local role.
+               Does not guarantee successful failover.
+               Requires appropriate DMV permissions.
                Returns one text value.
 ===============================================================================
 */
 
 SET NOCOUNT ON;
 
+DECLARE @Result varchar(16) = 'NOT_IN_AG';
+
 ------------------------------------------------------------
--- Evaluate failover readiness on local AG secondaries
+-- Check whether local AG replicas exist
+------------------------------------------------------------
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.dm_hadr_availability_replica_states
+    WHERE is_local = 1
+)
+BEGIN
+
+    --------------------------------------------------------
+    -- Check local primary AGs
+    --------------------------------------------------------
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM sys.dm_hadr_availability_replica_states
+        WHERE is_local = 1
+          AND role_desc = N'PRIMARY'
+    )
+    BEGIN
+
+        SET @Result = 'READY';
+
+        ----------------------------------------------------
+        -- Every local primary AG must have at least one
+        -- eligible synchronized automatic failover partner
+        ----------------------------------------------------
+
+        IF EXISTS
+        (
+            SELECT 1
+            FROM sys.dm_hadr_availability_replica_states AS local_ars
+
+            WHERE local_ars.is_local = 1
+              AND local_ars.role_desc = N'PRIMARY'
+
+              AND NOT EXISTS
+              (
+                  SELECT 1
+                  FROM sys.availability_replicas AS ar
+                  INNER JOIN sys.dm_hadr_availability_replica_states AS remote_ars
+                      ON remote_ars.group_id = ar.group_id
+                     AND remote_ars.replica_id = ar.replica_id
+
+                  WHERE ar.group_id = local_ars.group_id
+                    AND ar.replica_id <> local_ars.replica_id
+                    AND ar.availability_mode_desc = N'SYNCHRONOUS_COMMIT'
+                    AND ar.failover_mode_desc = N'AUTOMATIC'
+                    AND remote_ars.connected_state_desc = N'CONNECTED'
+                    AND remote_ars.synchronization_health_desc = N'HEALTHY'
+
+                    ------------------------------------------------
+                    -- Require all databases on the partner
+                    -- to be synchronized and failover-ready
+                    ------------------------------------------------
+
+                    AND NOT EXISTS
+                    (
+                        SELECT 1
+                        FROM sys.dm_hadr_database_replica_states AS drs
+                        INNER JOIN sys.dm_hadr_database_replica_cluster_states AS rcs
+                            ON rcs.group_database_id = drs.group_database_id
+                           AND rcs.replica_id = drs.replica_id
+
+                        WHERE drs.group_id = ar.group_id
+                          AND drs.replica_id = ar.replica_id
+                          AND
+                          (
+                              drs.synchronization_state_desc <> N'SYNCHRONIZED'
+                              OR rcs.is_failover_ready <> 1
+                          )
+                    )
+              )
+        )
+        BEGIN
+            SET @Result = 'NOT_READY';
+        END;
+
+    END
+
+    --------------------------------------------------------
+    -- Local secondary only
+    --------------------------------------------------------
+
+    ELSE IF EXISTS
+    (
+        SELECT 1
+        FROM sys.dm_hadr_availability_replica_states
+        WHERE is_local = 1
+          AND role_desc = N'SECONDARY'
+    )
+    BEGIN
+        SET @Result = 'SECONDARY';
+    END
+
+    --------------------------------------------------------
+    -- AG exists, but role is unknown
+    --------------------------------------------------------
+
+    ELSE
+    BEGIN
+        SET @Result = 'UNKNOWN';
+    END;
+
+END;
+
+------------------------------------------------------------
+-- Return one text value
 ------------------------------------------------------------
 
 SELECT
-    CASE
-        WHEN COUNT(*) = 0
-            THEN N'NOT_IN_AG'
-
-        WHEN MIN
-        (
-            CASE
-                WHEN rcs.is_failover_ready = 1 THEN 1
-                ELSE 0
-            END
-        ) = 1
-            THEN N'READY'
-
-        ELSE N'NOT_READY'
-    END AS failover_readiness
-FROM sys.dm_hadr_database_replica_cluster_states AS rcs
-INNER JOIN sys.dm_hadr_database_replica_states AS drs
-    ON drs.group_database_id = rcs.group_database_id
-   AND drs.replica_id = rcs.replica_id
-INNER JOIN sys.dm_hadr_availability_replica_states AS ars
-    ON ars.group_id = drs.group_id
-   AND ars.replica_id = drs.replica_id
-WHERE drs.is_local = 1
-  AND ars.is_local = 1
-  AND ars.role = 2;
+    @Result AS failover_readiness;
