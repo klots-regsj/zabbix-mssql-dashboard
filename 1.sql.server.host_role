@@ -9,7 +9,6 @@ Purpose      : Identify whether the SQL Server instance is
                Availability Groups as primary or secondary.
 
 ODBC Key     : db.odbc.select[1.sql.server.host_role,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
-
 Interval     : 5m
 History      : 90d
 Trends       : Not applicable
