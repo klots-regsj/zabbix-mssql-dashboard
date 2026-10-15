@@ -1,0 +1,133 @@
+
+/*
+===============================================================================
+ZABBIX SQL SERVER MONITORING - VERSION 1.0
+===============================================================================
+Name         : 7.sql.security.orphaned_users
+Purpose      : Count instance-authenticated SQL database users
+               whose corresponding server login no longer exists.
+
+ODBC Key     : db.odbc.select[7.sql.security.orphaned_users,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+
+Interval     : 24h
+History      : 730d
+Trends       : 1825d
+Type         : Numeric (unsigned)
+Compatibility: SQL Server 2012+
+
+AG Handling  : Includes standalone databases and local
+               AG primary replicas only.
+               Excludes AG secondary databases.
+
+Notes        : Counts SQL database users authenticated
+               through instance-level SQL logins.
+               Matches database users and server logins
+               by SID rather than name.
+               Excludes system users, contained users,
+               Windows users and Windows groups.
+               Excludes system databases, snapshots,
+               offline databases and DBA% databases.
+               Requires sufficient metadata visibility
+               in all included databases.
+               Returns one integer.
+===============================================================================
+*/
+
+SET NOCOUNT ON;
+
+DECLARE @OrphanedUsers int = 0;
+DECLARE @Database sysname;
+DECLARE @SQL nvarchar(max);
+
+------------------------------------------------------------
+-- Find eligible databases
+------------------------------------------------------------
+
+DECLARE databases CURSOR LOCAL FAST_FORWARD FOR
+
+SELECT
+    d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+  AND d.state_desc = N'ONLINE'
+  AND d.source_database_id IS NULL
+  AND d.name NOT LIKE N'DBA%'
+  AND
+  (
+      d.replica_id IS NULL
+
+      OR EXISTS
+      (
+          SELECT 1
+          FROM sys.dm_hadr_database_replica_states AS drs
+          INNER JOIN sys.dm_hadr_availability_replica_states AS ars
+              ON ars.group_id = drs.group_id
+             AND ars.replica_id = drs.replica_id
+          WHERE drs.database_id = d.database_id
+            AND drs.is_local = 1
+            AND ars.is_local = 1
+            AND ars.role = 1
+      )
+  );
+
+------------------------------------------------------------
+-- Check database users
+------------------------------------------------------------
+
+OPEN databases;
+
+FETCH NEXT FROM databases INTO @Database;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+    SET @SQL = N'
+        USE ' + QUOTENAME(@Database) + N';
+
+        SELECT
+            @Count = @Count + COUNT(*)
+        FROM sys.database_principals AS dp
+        WHERE dp.type = N''S''
+          AND dp.authentication_type_desc = N''INSTANCE''
+          AND dp.principal_id > 4
+
+          -- Exclude built-in database principals
+          AND dp.name NOT IN
+          (
+              N''dbo'',
+              N''guest'',
+              N''INFORMATION_SCHEMA'',
+              N''sys''
+          )
+
+          -- No corresponding SQL Server login
+          AND NOT EXISTS
+          (
+              SELECT 1
+              FROM sys.sql_logins AS sl
+              WHERE sl.sid = dp.sid
+          );
+    ';
+
+    EXEC sys.sp_executesql
+        @SQL,
+        N'@Count int OUTPUT',
+        @Count = @OrphanedUsers OUTPUT;
+
+    FETCH NEXT FROM databases INTO @Database;
+
+END;
+
+------------------------------------------------------------
+-- Cleanup
+------------------------------------------------------------
+
+CLOSE databases;
+DEALLOCATE databases;
+
+------------------------------------------------------------
+-- Return orphaned database user count
+------------------------------------------------------------
+
+SELECT
+    @OrphanedUsers AS orphaned_users;
