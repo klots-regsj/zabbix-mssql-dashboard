@@ -1,0 +1,67 @@
+
+/*
+===============================================================================
+ZABBIX SQL SERVER MONITORING - VERSION 1.0
+===============================================================================
+Name         : 3.sql.ag.failover_readiness
+Purpose      : Report failover readiness for databases
+               on local AG secondary replicas.
+
+ODBC Key     : db.odbc.select[3.sql.ag.failover_readiness,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+
+Interval     : 5m
+History      : 90d
+Trends       : Not applicable
+Type         : Character
+Compatibility: SQL Server 2012+
+
+AG Handling  : Includes local AG secondary replicas only.
+               Excludes primary and remote replica rows.
+
+Values       : READY
+               NOT_READY
+               NOT_IN_AG
+
+Notes        : Uses sys.dm_hadr_database_replica_cluster_states.
+               Checks is_failover_ready for all qualifying
+               databases on local secondary replicas.
+               Returns NOT_READY if any database is not ready.
+               Returns NOT_IN_AG if no local secondary exists.
+               Readiness does not guarantee successful failover.
+               Requires sufficient server permissions.
+               Returns one text value.
+===============================================================================
+*/
+
+SET NOCOUNT ON;
+
+------------------------------------------------------------
+-- Evaluate failover readiness on local AG secondaries
+------------------------------------------------------------
+
+SELECT
+    CASE
+        WHEN COUNT(*) = 0
+            THEN N'NOT_IN_AG'
+
+        WHEN MIN
+        (
+            CASE
+                WHEN rcs.is_failover_ready = 1 THEN 1
+                ELSE 0
+            END
+        ) = 1
+            THEN N'READY'
+
+        ELSE N'NOT_READY'
+    END AS failover_readiness
+FROM sys.dm_hadr_database_replica_cluster_states AS rcs
+INNER JOIN sys.dm_hadr_database_replica_states AS drs
+    ON drs.group_database_id = rcs.group_database_id
+   AND drs.replica_id = rcs.replica_id
+INNER JOIN sys.dm_hadr_availability_replica_states AS ars
+    ON ars.group_id = drs.group_id
+   AND ars.replica_id = drs.replica_id
+WHERE drs.is_local = 1
+  AND ars.is_local = 1
+  AND ars.role = 2;
