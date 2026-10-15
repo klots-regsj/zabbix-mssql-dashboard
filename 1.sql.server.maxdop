@@ -7,7 +7,7 @@ Name         : 1.sql.server.maxdop
 Purpose      : Return the active instance-level MAXDOP
                (Max Degree of Parallelism) configuration.
 
-ODBC Key     : db.odbc.select[1.sql.server.maxdop,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
+ODBC Key     : db.odbc.select[1.sql.server.maxdop,,"Driver={$MSSQL.ODBC.DRIVER};Server=tcp:{$MSSQL.HOST},{$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
 
 Interval     : 24h
 History      : 730d
