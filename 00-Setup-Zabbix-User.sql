@@ -2,12 +2,12 @@
 /*
 ===============================================================================
 ZABBIX SQL SERVER - INITIAL SETUP
-VERSION 1.1
+VERSION 1.2
 ===============================================================================
 Name         : 00-Setup-Zabbix-User.sql
 
-Purpose      : Create or update the SQL Server login and
-               monitoring permissions required by Zabbix.
+Purpose      : Create or update SQL Server monitoring permissions
+               required by Zabbix.
 
 Compatibility: SQL Server 2012+
 Execution    : SSMS / Central Management Server (CMS)
@@ -23,6 +23,7 @@ Permissions  : VIEW SERVER STATE
                SQLAgentReaderRole in msdb
                SELECT on msdb.dbo.sysjobhistory
                db_datareader in DBA database
+               SELECT on master.dbo.CommandLog (if present)
 
 AG Handling  : Configures standalone databases and local
                AG primary replicas.
@@ -30,14 +31,17 @@ AG Handling  : Configures standalone databases and local
                Existing AG database users are replicated.
                Matching login SIDs are required on replicas.
 
+Password     : Required only when creating a new SQL login.
+               Existing login passwords are never changed.
+
 Notes        : Idempotent.
                Does not grant sysadmin or db_owner.
-               Does not grant read access to application
-               tables outside the DBA database.
+               Does not grant application table read access
+               outside the DBA database.
                Skips offline databases and snapshots.
                Reports database-level errors.
-               Does not change SQL Agent jobs.
-               Does not change Query Store configuration.
+               Does not modify SQL Agent jobs.
+               Does not modify Query Store configuration.
 ===============================================================================
 */
 
@@ -51,12 +55,10 @@ SET NOCOUNT ON;
 
 DECLARE @LoginName sysname = N'zabbix_prod';
 
+-- Used ONLY when the SQL login does not exist.
+-- Never committed with a real password to GitHub.
 DECLARE @Password nvarchar(128) =
     N'CHANGE_ME_TO_A_STRONG_PASSWORD';
-
--- 0 = Keep password on existing logins
--- 1 = Reset password on existing SQL logins
-DECLARE @ResetExistingPassword bit = 0;
 
 ------------------------------------------------------------
 -- INTERNAL VARIABLES
@@ -77,6 +79,7 @@ DECLARE @UpdatedDatabases int = 0;
 DECLARE @ErrorDatabases int = 0;
 
 DECLARE @DBAReadAccess varchar(20) = 'NOT FOUND';
+DECLARE @CommandLogAccess varchar(20) = 'NOT FOUND';
 
 DECLARE @DatabaseResults TABLE
 (
@@ -103,21 +106,25 @@ BEGIN
         1;
 END;
 
-IF @Password IS NULL
-   OR @Password = N'CHANGE_ME_TO_A_STRONG_PASSWORD'
-   OR LEN(@Password) = 0
-BEGIN
-    THROW 50002,
-        'Configure a password before execution.',
-        1;
-END;
-
 ------------------------------------------------------------
--- Create SQL login if missing
+-- Create SQL login only when missing
 ------------------------------------------------------------
 
 IF SUSER_ID(@LoginName) IS NULL
 BEGIN
+
+    --------------------------------------------------------
+    -- Password is required ONLY for new logins
+    --------------------------------------------------------
+
+    IF @Password IS NULL
+       OR @Password = N'CHANGE_ME_TO_A_STRONG_PASSWORD'
+       OR LEN(@Password) = 0
+    BEGIN
+        THROW 50002,
+            'Configure a password to create the SQL login.',
+            1;
+    END;
 
     SET @SQL =
         N'CREATE LOGIN ' + QUOTENAME(@LoginName) +
@@ -135,7 +142,8 @@ ELSE
 BEGIN
 
     --------------------------------------------------------
-    -- Require an existing SQL-authenticated login
+    -- Existing login must use SQL authentication
+    -- Password and login SID remain unchanged
     --------------------------------------------------------
 
     IF NOT EXISTS
@@ -148,23 +156,6 @@ BEGIN
         THROW 50004,
             'Existing login is not a SQL login.',
             1;
-    END;
-
-    --------------------------------------------------------
-    -- Optional password reset
-    --------------------------------------------------------
-
-    IF @ResetExistingPassword = 1
-    BEGIN
-
-        SET @SQL =
-            N'ALTER LOGIN ' + QUOTENAME(@LoginName) +
-            N' WITH PASSWORD = N''' +
-            REPLACE(@Password, N'''', N'''''') +
-            N''';';
-
-        EXEC sys.sp_executesql @SQL;
-
     END;
 
 END;
@@ -203,6 +194,108 @@ BEGIN
         QUOTENAME(@LoginName) + N';';
 
     EXEC sys.sp_executesql @SQL;
+
+END;
+
+------------------------------------------------------------
+-- Configure master user and CommandLog access
+------------------------------------------------------------
+
+IF OBJECT_ID(N'master.dbo.CommandLog', N'U') IS NOT NULL
+BEGIN
+
+    BEGIN TRY
+
+        SET @SQL = N'
+USE [master];
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.database_principals
+    WHERE name = @UserName
+)
+BEGIN
+
+    DECLARE @CreateSQL nvarchar(max);
+
+    SET @CreateSQL =
+        N''CREATE USER '' + QUOTENAME(@UserName) +
+        N'' FOR LOGIN '' + QUOTENAME(@UserName);
+
+    EXEC sys.sp_executesql @CreateSQL;
+
+END
+ELSE
+BEGIN
+
+    DECLARE @UserSID varbinary(85);
+    DECLARE @LoginSID varbinary(85);
+
+    SELECT @UserSID = sid
+    FROM sys.database_principals
+    WHERE name = @UserName;
+
+    SELECT @LoginSID = sid
+    FROM sys.server_principals
+    WHERE name = @UserName;
+
+    IF @UserSID <> @LoginSID
+    BEGIN
+
+        DECLARE @AlterSQL nvarchar(max);
+
+        SET @AlterSQL =
+            N''ALTER USER '' + QUOTENAME(@UserName) +
+            N'' WITH LOGIN = '' + QUOTENAME(@UserName);
+
+        EXEC sys.sp_executesql @AlterSQL;
+
+    END;
+
+END;
+';
+
+        EXEC sys.sp_executesql
+            @SQL,
+            N'@UserName sysname',
+            @UserName = @LoginName;
+
+        ----------------------------------------------------
+        -- Grant SELECT on MaintenanceSolution CommandLog
+        ----------------------------------------------------
+
+        SET @SQL =
+            N'USE [master];
+              GRANT SELECT ON OBJECT::dbo.CommandLog TO ' +
+              QUOTENAME(@LoginName) + N';';
+
+        EXEC sys.sp_executesql @SQL;
+
+        SET @CommandLogAccess = 'GRANTED';
+
+    END TRY
+    BEGIN CATCH
+
+        SET @CommandLogAccess = 'ERROR';
+
+        SET @ErrorDatabases =
+            @ErrorDatabases + 1;
+
+        INSERT INTO @DatabaseResults
+        (
+            DatabaseName,
+            Status,
+            Details
+        )
+        VALUES
+        (
+            N'master',
+            N'ERROR',
+            ERROR_MESSAGE()
+        );
+
+    END CATCH;
 
 END;
 
@@ -461,9 +554,6 @@ END;
 
         ----------------------------------------------------
         -- DBA database: grant db_datareader
-        --
-        -- Read access to all user tables and views
-        -- in DBA, including dbo.LoginActivity.
         ----------------------------------------------------
 
         IF @Database = N'DBA'
@@ -575,6 +665,7 @@ SELECT
     @UpdatedDatabases AS UpdatedDatabases,
     @ErrorDatabases AS ErrorDatabases,
     @DBAReadAccess AS DBAReadAccess,
+    @CommandLogAccess AS CommandLogAccess,
 
     CASE
         WHEN @ErrorDatabases = 0 THEN N'OK'
