@@ -5,7 +5,7 @@ ZABBIX SQL SERVER MONITORING - VERSION 1.0
 ===============================================================================
 Name         : 8.sql.maintenance.log_backup_overdue_count
 Purpose      : Count standalone databases without a successful
-               transaction log backup within 60 minutes.
+               transaction log backup within 180 minutes.
 
 ODBC Key     : db.odbc.select[8.sql.maintenance.log_backup_overdue_count,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
 
@@ -54,5 +54,5 @@ WHERE d.database_id > 4
       FROM msdb.dbo.backupset AS b
       WHERE b.database_name = d.name
         AND b.type = 'L'
-        AND b.backup_finish_date >= DATEADD(MINUTE, -60, GETDATE())
+        AND b.backup_finish_date >= DATEADD(MINUTE, -180, GETDATE())
   );
