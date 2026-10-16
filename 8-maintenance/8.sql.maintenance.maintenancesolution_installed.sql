@@ -10,8 +10,8 @@ Purpose      : Check whether MaintenanceSolution is installed
 ODBC Key     : db.odbc.select[8.sql.maintenance.maintenancesolution_installed,,"Driver={$MSSQL.ODBC.DRIVER};Server={$MSSQL.HOST};Port={$MSSQL.PORT};UID={$MSSQL.USER};PWD={$MSSQL.PASSWORD};Encrypt={$MSSQL.ENCRYPT}"]
 
 Interval     : 24h
-History      : 365d
-Trends       : 730d
+History      : 730d
+Trends       : 1825d
 Type         : Numeric (unsigned)
 Compatibility: SQL Server 2012+
 
