@@ -20,7 +20,7 @@ AG Handling  : Instance-level SQL Agent monitoring.
 
 Notes        : Reads msdb.dbo.sysjobs and sysjobhistory.
                Checks completed job executions only.
-               Includes DatabaseBackup, IndexOptimize
+               Includes IndexOptimize
                and DatabaseIntegrityCheck jobs.
                Counts failures, not distinct jobs.
                Returns one integer.
